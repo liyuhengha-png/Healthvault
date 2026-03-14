@@ -1,0 +1,39 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Bun（项目使用 npm，bun 锁文件不提交）
+bun.lock
+bun.lockb
+
+# Python
+server/.env
+server/.venv
+server/__pycache__
+server/src/__pycache__
+
+# AI 上下文文档（本地生成，不提交）
+CLAUDE.md
+src/CLAUDE.md
+server/CLAUDE.md
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
