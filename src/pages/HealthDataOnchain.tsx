@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import AppLayout from "@/components/AppLayout";
 import { Badge } from "@/components/ui/badge";
@@ -21,6 +21,23 @@ import {
   Wallet,
 } from "lucide-react";
 
+type ParsedIndicator = {
+  id: string;
+  name: string;
+  category: string;
+  value: string;
+  unit: string;
+  referenceRange: string;
+  status: string;
+  instrument?: string;
+};
+
+type ParseResponse = {
+  fileName: string;
+  indicatorCount: number;
+  indicators: ParsedIndicator[];
+};
+
 type OnchainOption = {
   id: string;
   title: string;
@@ -37,43 +54,13 @@ type SimulationResult = {
   simulatedAt: string;
 };
 
-const ONCHAIN_OPTIONS: OnchainOption[] = [
-  {
-    id: "lab-summary",
-    title: "Lab Summary Commitment",
-    description: "A minimal summary proving this report contains blood chemistry and metabolic panel results.",
-    visibility: "Only a summary hash and category labels would be displayed on-chain.",
-    payload: {
-      reportType: "Annual Blood Panel",
-      categories: ["Lab Results", "Vitals"],
-      abnormalCount: 2,
-      confidence: "verified-preview",
-    },
-  },
-  {
-    id: "eligibility-signal",
-    title: "Research Eligibility Signal",
-    description: "A compact eligibility marker that can be shared with future matching flows.",
-        visibility: "Only a boolean-style signal and consent timestamp would be visible on-chain.",
-        payload: {
-          signalType: "cardio-metabolic-interest",
-          eligibility: true,
-          consentWindow: "90 days",
-          version: "release-v1",
-        },
-      },
-  {
-    id: "integrity-proof",
-    title: "Report Integrity Proof",
-    description: "A provenance record showing that the uploaded report was parsed and reviewed in HealthVault.",
-    visibility: "Only document fingerprint metadata would be stored on-chain.",
-        payload: {
-          parser: "HealthVault AI Parser",
-          fingerprint: "0x6f1d...c2a9",
-          reviewedBy: "wallet-owner",
-          environment: "production-preview",
-        },
-      },
+const CATEGORY_ORDER = [
+  "Lab Results",
+  "Vitals",
+  "Imaging / Reports",
+  "Conditions & Diagnoses",
+  "Medications",
+  "Wearable Data",
 ];
 
 const PROTECTED_FIELDS = [
@@ -87,26 +74,92 @@ const PROTECTED_FIELDS = [
 
 const DEMO_WALLET_ADDRESS = "0x8F31A7c65d10B3fF2c9a6212e7A018A63A12F4D9";
 const DEMO_TRANSACTION_HASH = "0x7c4d18b9a6ef10d0d99b221445af31dd2f91d4b6016f3da8937ebff201f0c2aa";
+const SESSION_KEY = "vital-key-chain:health-data:onchain-source:v1";
+
+const slugify = (value: string) =>
+  value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "category";
 
 const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+function buildOptionsFromReport(report: ParseResponse): OnchainOption[] {
+  const groups = new Map<string, ParsedIndicator[]>();
+  for (const cat of CATEGORY_ORDER) groups.set(cat, []);
+
+  for (const ind of report.indicators) {
+    const key = ind.category || "Uncategorized";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(ind);
+  }
+
+  const options: OnchainOption[] = [];
+  const ordered = [
+    ...CATEGORY_ORDER.filter((c) => (groups.get(c)?.length ?? 0) > 0),
+    ...[...groups.keys()].filter((k) => !CATEGORY_ORDER.includes(k) && (groups.get(k)?.length ?? 0) > 0).sort(),
+  ];
+
+  for (const cat of ordered) {
+    const indicators = groups.get(cat) ?? [];
+    if (!indicators.length) continue;
+    const abnormalCount = indicators.filter((i) => ["high", "low", "abnormal"].includes(i.status)).length;
+    options.push({
+      id: `category:${slugify(cat)}`,
+      title: cat,
+      description: `${indicators.length} indicator${indicators.length === 1 ? "" : "s"}${abnormalCount > 0 ? `, ${abnormalCount} flagged` : ""}`,
+      visibility: "Only summary-level commitments for this category are published on-chain.",
+      payload: {
+        fileName: report.fileName,
+        category: cat,
+        indicatorCount: indicators.length,
+        abnormalCount,
+        statusBreakdown: indicators.reduce<Record<string, number>>((acc, i) => {
+          const s = i.status || "unknown";
+          acc[s] = (acc[s] ?? 0) + 1;
+          return acc;
+        }, {}),
+        indicatorIds: indicators.map((i) => i.id),
+      },
+    });
+  }
+  return options;
+}
 
 export default function HealthDataOnchain() {
   const { connect, address, shortAddress, isConnected, isConnecting, isWalletAvailable } = useWalletContext();
   const { toast } = useToast();
-  const [selectedIds, setSelectedIds] = useState<string[]>(["lab-summary", "integrity-proof"]);
+  const [report, setReport] = useState<ParseResponse | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [result, setResult] = useState<SimulationResult | null>(null);
 
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(SESSION_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed?.version === 1 && parsed?.report) {
+        setReport(parsed.report as ParseResponse);
+      }
+    } catch {
+      // Ignore malformed sessionStorage
+    }
+  }, []);
+
+  const onchainOptions = useMemo(() => (report ? buildOptionsFromReport(report) : []), [report]);
+
+  useEffect(() => {
+    if (onchainOptions.length > 0 && selectedIds.length === 0) {
+      setSelectedIds(onchainOptions.map((o) => o.id));
+    }
+  }, [onchainOptions]);
+
   const selectedOptions = useMemo(
-    () => ONCHAIN_OPTIONS.filter((option) => selectedIds.includes(option.id)),
-    [selectedIds],
+    () => onchainOptions.filter((option) => selectedIds.includes(option.id)),
+    [selectedIds, onchainOptions],
   );
 
   const toggleSelection = (id: string, checked: boolean) => {
     setSelectedIds((current) => {
-      if (checked) {
-        return current.includes(id) ? current : [...current, id];
-      }
+      if (checked) return current.includes(id) ? current : [...current, id];
       return current.filter((item) => item !== id);
     });
   };
@@ -122,7 +175,6 @@ export default function HealthDataOnchain() {
     }
 
     setIsSubmitting(true);
-
     try {
       let walletAddress = address;
 
@@ -171,6 +223,27 @@ export default function HealthDataOnchain() {
       setIsSubmitting(false);
     }
   };
+
+  // Empty state — no report data in sessionStorage
+  if (!report) {
+    return (
+      <AppLayout title="On-Chain Review">
+        <div className="p-6 flex flex-col items-center justify-center min-h-[40vh] gap-4 text-center">
+          <FileJson className="h-12 w-12 text-muted-foreground" />
+          <h2 className="text-xl font-semibold text-foreground">No report data found</h2>
+          <p className="text-sm text-muted-foreground max-w-sm">
+            Upload and parse a health report first to continue with the on-chain flow.
+          </p>
+          <Button asChild>
+            <Link to="/health-data">
+              <ArrowLeft className="h-4 w-4 mr-2" />
+              Back to Health Data
+            </Link>
+          </Button>
+        </div>
+      </AppLayout>
+    );
+  }
 
   if (result) {
     return (
@@ -260,9 +333,7 @@ export default function HealthDataOnchain() {
                   <Button
                     variant="outline"
                     className="gap-2"
-                    onClick={() => {
-                      setResult(null);
-                    }}
+                    onClick={() => setResult(null)}
                   >
                     Create another record
                   </Button>
@@ -308,133 +379,53 @@ export default function HealthDataOnchain() {
                   </div>
                 </div>
               </div>
-
-              <div className="rounded-2xl border border-white/10 bg-white/8 p-5">
-                <div className="flex items-center gap-2 text-sm font-medium text-white/90">
-                  <Sparkles className="h-4 w-4 text-teal-200" />
-                  Privacy promise
-                </div>
-                <div className="mt-4 space-y-3">
-                  {PROTECTED_FIELDS.slice(0, 4).map((field) => (
-                    <div key={field} className="rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm text-white/82">
-                      {field}
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-5 rounded-2xl border border-emerald-300/15 bg-emerald-400/8 p-4 text-sm text-white/82">
-                  Private health details are represented by hashed or summarized records only. The original data is not directly written to chain.
-                </div>
-              </div>
             </div>
           </section>
 
-          <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
-            <div className="vault-card p-6">
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <h3 className="flex items-center gap-2 text-lg font-semibold text-foreground">
-                    <Blocks className="h-4 w-4 text-primary" />
-                    Select what goes on-chain
-                  </h3>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    Choose the summaries you want to publish while keeping private details protected.
-                  </p>
-                </div>
-                <Badge variant="outline" className="border-primary/20 bg-accent/50 text-accent-foreground">
-                  {selectedOptions.length} selected
-                </Badge>
-              </div>
-
-              <div className="mt-5 space-y-4">
-                {ONCHAIN_OPTIONS.map((option) => {
-                  const checked = selectedIds.includes(option.id);
-
-                  return (
-                    <label
-                      key={option.id}
-                      className={`block rounded-3xl border p-5 transition-all ${checked ? "border-primary bg-accent/35 shadow-[var(--shadow-sm)]" : "border-border bg-background hover:border-primary/20"}`}
-                    >
-                      <div className="flex items-start gap-4">
-                        <Checkbox
-                          checked={checked}
-                          onCheckedChange={(value) => toggleSelection(option.id, value === true)}
-                          className="mt-1"
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <div className="text-base font-semibold text-foreground">{option.title}</div>
-                            <Badge className="bg-slate-100 text-slate-700 hover:bg-slate-100">{checked ? "Selected" : "Optional"}</Badge>
-                          </div>
-                          <div className="mt-2 text-sm leading-6 text-muted-foreground">{option.description}</div>
-                          <div className="mt-3 rounded-2xl border border-border bg-muted/25 px-4 py-3 text-xs text-muted-foreground">
-                            {option.visibility}
-                          </div>
-                            <div className="mt-4 rounded-2xl bg-slate-950 p-4 text-xs leading-6 text-slate-100">
-                            <div className="mb-2 flex items-center gap-2 text-slate-300">
-                              <FileJson className="h-3.5 w-3.5" />
-                              Payload preview
-                            </div>
-                            <pre className="overflow-auto">{JSON.stringify(option.payload, null, 2)}</pre>
-                          </div>
-                        </div>
-                      </div>
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="space-y-6">
-              <div className="vault-card p-6">
-                <h3 className="flex items-center gap-2 text-lg font-semibold text-foreground">
-                  <Lock className="h-4 w-4 text-primary" />
-                  What stays private
-                </h3>
-                <div className="mt-4 space-y-3">
-                  {PROTECTED_FIELDS.map((field) => (
-                    <div key={field} className="rounded-2xl border border-emerald-100 bg-emerald-50/70 px-4 py-3 text-sm text-emerald-800">
-                      {field}
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="vault-card p-6">
-                <h3 className="flex items-center gap-2 text-lg font-semibold text-foreground">
-                  <Wallet className="h-4 w-4 text-primary" />
-                  Wallet and execution
-                </h3>
-                <div className="mt-4 space-y-4 text-sm">
-                  <div className="rounded-2xl border border-border bg-muted/20 p-4">
-                    <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Wallet status</div>
-                    <div className="mt-2 font-medium text-foreground">
-                      {isConnected ? shortAddress : isWalletAvailable ? "Ready to connect on action" : "A temporary session address will be prepared if needed"}
-                    </div>
-                  </div>
-                  <div className="rounded-2xl border border-border bg-muted/20 p-4">
-                    <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">Execution model</div>
-                    <div className="mt-2 font-medium text-foreground">Browser wallet confirmation</div>
-                    <div className="mt-2 text-xs leading-5 text-muted-foreground">
-                      The flow first attempts to connect the browser wallet. Once connected, it creates an on-chain record and returns a transaction receipt.
+          <section>
+            <h3 className="text-lg font-semibold text-foreground mb-4">Select what to publish</h3>
+            <div className="grid gap-4 md:grid-cols-2">
+              {onchainOptions.map((option) => (
+                <div
+                  key={option.id}
+                  className={`vault-card p-5 cursor-pointer transition-all ${
+                    selectedIds.includes(option.id) ? "border-primary/50 bg-accent/30" : ""
+                  }`}
+                  onClick={() => toggleSelection(option.id, !selectedIds.includes(option.id))}
+                >
+                  <div className="flex items-start gap-3">
+                    <Checkbox
+                      checked={selectedIds.includes(option.id)}
+                      onCheckedChange={(checked) => toggleSelection(option.id, checked === true)}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    <div className="flex-1">
+                      <div className="font-medium text-foreground">{option.title}</div>
+                      <div className="text-sm text-muted-foreground mt-1">{option.description}</div>
+                      <div className="text-xs text-muted-foreground/70 mt-2">{option.visibility}</div>
                     </div>
                   </div>
                 </div>
-
-                <div className="mt-5 flex flex-wrap gap-3">
-                  <Button asChild variant="outline" className="gap-2">
-                    <Link to="/health-data">
-                      <ArrowLeft className="h-4 w-4" />
-                      Back to results
-                    </Link>
-                  </Button>
-                  <Button className="gap-2" disabled={isSubmitting || isConnecting} onClick={handleSimulateOnchain}>
-                    {isSubmitting || isConnecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
-                    {isConnecting ? "Connecting wallet..." : isSubmitting ? "Publishing on-chain..." : "Write To Chain"}
-                  </Button>
-                </div>
-              </div>
+              ))}
             </div>
           </section>
+
+          <div className="flex flex-wrap gap-3">
+            <Button asChild variant="outline" className="gap-2">
+              <Link to="/health-data">
+                <ArrowLeft className="h-4 w-4" />
+                Back to report
+              </Link>
+            </Button>
+            <Button
+              className="gap-2"
+              disabled={isSubmitting || selectedOptions.length === 0}
+              onClick={handleSimulateOnchain}
+            >
+              {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Blocks className="h-4 w-4" />}
+              {isSubmitting ? "Processing..." : "Publish on-chain"}
+            </Button>
+          </div>
         </div>
       </div>
     </AppLayout>

@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import AppLayout from "@/components/AppLayout";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -283,6 +284,7 @@ const downloadParsedJson = (data: ParseResponse) => {
 };
 
 export default function HealthDataUpload() {
+  const [consentGiven, setConsentGiven] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
@@ -353,6 +355,10 @@ export default function HealthDataUpload() {
 
       const responseText = await response.text();
       const data = normalizeParseResponse(extractResponsePayload(responseText), file.name);
+      sessionStorage.setItem(
+        "vital-key-chain:health-data:onchain-source:v1",
+        JSON.stringify({ version: 1, savedAt: new Date().toISOString(), report: data }),
+      );
       setParsedData(data);
       setUploadHistory((current) => [
         {
@@ -418,9 +424,27 @@ export default function HealthDataUpload() {
                 </p>
               </div>
 
+              <div className="rounded-2xl border border-white/15 bg-white/8 p-4 space-y-3">
+                <p className="text-sm text-white/85 leading-relaxed">
+                  I understand that by uploading my health report, I consent to the automated processing of my document for the purpose of extracting and displaying health indicators. My personal identifiers will not be stored or shared. I can withdraw at any time.
+                </p>
+                <div className="flex items-center gap-3">
+                  <Checkbox
+                    id="consent-checkbox"
+                    checked={consentGiven}
+                    onCheckedChange={(checked) => setConsentGiven(checked === true)}
+                    className="border-white/40 data-[state=checked]:bg-primary data-[state=checked]:border-primary"
+                  />
+                  <label htmlFor="consent-checkbox" className="text-sm text-white/90 cursor-pointer select-none">
+                    I have read and agree to the above terms
+                  </label>
+                </div>
+              </div>
+
               <div
-                className={`rounded-2xl border border-white/12 bg-white/8 p-5 backdrop-blur transition-all ${dragging ? "border-primary bg-white/14" : "hover:bg-white/10"}`}
+                className={`rounded-2xl border border-white/12 bg-white/8 p-5 backdrop-blur transition-all ${dragging ? "border-primary bg-white/14" : "hover:bg-white/10"} ${!consentGiven ? "pointer-events-none opacity-50" : ""}`}
                 onDragOver={(event) => {
+                  if (!consentGiven) return;
                   event.preventDefault();
                   setDragging(true);
                 }}
@@ -450,7 +474,7 @@ export default function HealthDataUpload() {
                   <div className="flex flex-wrap gap-3">
                     <Button
                       className="gap-2 border border-white/10 bg-white text-slate-900 hover:bg-white/90"
-                      disabled={isUploading}
+                      disabled={isUploading || !consentGiven}
                       onClick={() => fileInputRef.current?.click()}
                     >
                       {isUploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .ark_client import build_ark_client
+from .database import init_db, save_parse_result, search_profiles
 from .pdf_parser import PDFParseError, extract_pdf_text
 from .summarizer import summarize_pdf_text
 
@@ -45,6 +46,10 @@ app = FastAPI(
     title="vital-key-chain server",
     version="0.1.0",
 )
+
+@app.on_event("startup")
+def startup_event() -> None:
+    init_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -101,4 +106,48 @@ async def parse_health_file(file: UploadFile = File(...)) -> ParseHealthFileResp
         meta["max_file_size_mb"] = MAX_FILE_SIZE // (1024 * 1024)
         meta["ark_base_url"] = os.getenv("ARK_BASE_URL", "https://api.tu-zi.com/v1")
 
+    try:
+        save_parse_result(result)
+    except Exception:
+        pass  # Persistence failure must not break the parse response
+
     return ParseHealthFileResponse.model_validate(result)
+
+
+class ProfileItem(BaseModel):
+    id: str
+    conditions: list[str]
+    meds: list[str]
+    ageRange: str
+    sex: str
+    matchScore: int
+    wearable: bool
+
+
+class SearchProfilesResponse(BaseModel):
+    items: list[ProfileItem]
+    total: int
+    limit: int
+    offset: int
+
+
+@app.get("/api/profiles/search", response_model=SearchProfilesResponse)
+def search_profiles_endpoint(
+    q: str | None = Query(default=None),
+    condition: str | None = Query(default=None),
+    medication: str | None = Query(default=None),
+    age: str | None = Query(default=None),
+    sex: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> SearchProfilesResponse:
+    result = search_profiles(
+        q=q,
+        condition=condition,
+        medication=medication,
+        age=age,
+        sex=sex,
+        limit=limit,
+        offset=offset,
+    )
+    return SearchProfilesResponse.model_validate(result)
